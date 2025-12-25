@@ -15,6 +15,7 @@ export interface LevelData {
   id: number;
   name: string;
   description: string;
+  quote?: string; // Philosophical quote for the level
   blocks: BlockData[];
   startPos: [number, number, number];
   goalPos: [number, number, number];

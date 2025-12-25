@@ -222,7 +222,7 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
       const geo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
       
       // Default Material Props
-      const baseMatProps = {
+      const baseMatProps: any = {
         color: 0xdcdcdc,
         emissive: 0x000000,
         emissiveIntensity: 0.2,
@@ -237,9 +237,13 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
       } else if (block.type === 'start') {
         baseMatProps.color = 0x888899; 
       } else if (block.type === 'deco') {
-        baseMatProps.color = 0x050505; 
-        baseMatProps.roughness = 0.9;
-        baseMatProps.metalness = 0.1;
+        baseMatProps.color = 0xd946ef; 
+        baseMatProps.emissive = 0xa21caf; 
+        baseMatProps.emissiveIntensity = 0.5;
+        baseMatProps.transparent = true;
+        baseMatProps.opacity = 0.25; 
+        baseMatProps.roughness = 0.1;
+        baseMatProps.metalness = 0.5;
       }
 
       // Material creation logic
@@ -282,25 +286,17 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
 
   // Reset camera when level changes
   useEffect(() => {
-    // 1. Reset Camera State to "Free Roam" / "Inspection" Mode
-    // Instead of snapping directly to ISO_PHI (Side View), we set it to FREE_ROAM_PHI.
-    // This creates a 3D isometric look where depth is visible.
     cameraState.current = { 
-        theta: Math.PI / 4, // 45 degrees
-        phi: FREE_ROAM_PHI, // Slightly elevated "3D" look
+        theta: Math.PI / 4, 
+        phi: FREE_ROAM_PHI, 
         radius: 20 
     };
+    setViewMode('SIDE'); 
+    setMsg("Drag & Release to Align Perspective"); 
     
-    // 2. Reset UI
-    setViewMode('SIDE'); // Default logic state, even though visually it's 3D
-    setMsg("Drag & Release to Align Perspective"); // Prompt user to interact
-    
-    // 3. Apply Camera Update Immediately
     if (cameraRef.current) {
         updateCameraPosition(cameraRef.current, cameraState.current);
     }
-
-    // 4. Build Level
     buildLevel();
   }, [level]);
 
@@ -384,7 +380,6 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
     }
   };
 
-
   const checkMove = (direction: 'UP' | 'DOWN' | 'LEFT' | 'RIGHT') => {
     if (isMovingRef.current || isDragging.current || !cameraRef.current || !playerRef.current || isResetting) return;
 
@@ -397,58 +392,64 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
     if (direction === 'LEFT') inputScreenDir.set(-1, 0);
     if (direction === 'RIGHT') inputScreenDir.set(1, 0);
 
-    const candidates = [
-      { vec: new THREE.Vector3(0, 0, -1), label: 'North' },
-      { vec: new THREE.Vector3(0, 0, 1), label: 'South' },
-      { vec: new THREE.Vector3(-1, 0, 0), label: 'West' },
-      { vec: new THREE.Vector3(1, 0, 0), label: 'East' },
+    // Current Player Visual Center
+    const currentVisPos = new THREE.Vector3(
+        playerGridPos.current.x, 
+        playerGridPos.current.y + CUBE_SIZE/2, 
+        playerGridPos.current.z
+    );
+    const pScreen = currentVisPos.clone().project(cam);
+    const pScreen2D = new THREE.Vector2(pScreen.x, pScreen.y);
+
+    // 2. Determine "Reference Step Size"
+    // Which of the 4 cardinal directions (North, South, East, West) best matches the input visually?
+    // And how "long" is a single step in that direction on screen?
+    const candidates3D = [
+        new THREE.Vector3(0, 0, -1), // North
+        new THREE.Vector3(0, 0, 1),  // South
+        new THREE.Vector3(-1, 0, 0), // West
+        new THREE.Vector3(1, 0, 0)   // East
     ];
 
-    const pVis = playerRef.current.position.clone();
-    const pScreen = pVis.clone().project(cam);
+    let best3DDir: THREE.Vector3 | null = null;
+    let maxDot = 0;
+    let refStepScreenLen = 0;
 
-    let bestWorldDir = new THREE.Vector3();
-    let maxDot = -Infinity;
-
-    candidates.forEach(c => {
-        const testPos = pVis.clone().add(c.vec.clone().multiplyScalar(0.5));
+    candidates3D.forEach(v3 => {
+        const testPos = currentVisPos.clone().add(v3);
         const testScreen = testPos.project(cam);
-        const dirScreen = new THREE.Vector2(testScreen.x - pScreen.x, testScreen.y - pScreen.y).normalize();
-        
-        const dot = dirScreen.dot(inputScreenDir);
+        const testScreen2D = new THREE.Vector2(testScreen.x, testScreen.y);
+        const dir2D = new THREE.Vector2().subVectors(testScreen2D, pScreen2D);
+        const len = dir2D.length();
+
+        // Avoid degenerate directions (steps that go strictly into/out of screen)
+        if (len < 0.02) return; 
+
+        const dot = dir2D.clone().normalize().dot(inputScreenDir);
         if (dot > maxDot) {
             maxDot = dot;
-            bestWorldDir = c.vec;
+            best3DDir = v3;
+            refStepScreenLen = len;
         }
     });
 
-    if (maxDot < 0.5) return; 
+    // If no direction matches nicely (e.g. view is awkward), abort
+    if (!best3DDir || maxDot < 0.8) {
+        shakeCamera();
+        audioController?.playFail();
+        return;
+    }
 
-    // 2. Calculate Ideal Screen Target (Where we want to be on screen)
-    const idealStepGridPos = playerGridPos.current.clone().add(bestWorldDir);
-    const idealStepVisPos = new THREE.Vector3(
-        idealStepGridPos.x, 
-        playerGridPos.current.y + CUBE_SIZE/2, 
-        idealStepGridPos.z
-    );
-    const idealStepScreen = idealStepVisPos.project(cam);
-    const idealScreen2D = new THREE.Vector2(idealStepScreen.x, idealStepScreen.y);
+    // 3. Scan ALL blocks to find one that matches visual criteria
+    const validBlocks: { mesh: THREE.Mesh, camDist: number }[] = [];
 
-    // 3. Determine VISIBLE FACE based on Camera Angle
-    // This logic determines which face of a block implies "Danger" if seen.
+    // Safety: Determine visible face for danger blocks
     let visibleFace: BlockFace | null = null;
-    
     if (viewMode === 'TOP') {
         visibleFace = 'top';
     } else {
-        // Normalize theta to 0 - 2PI
         let t = cameraState.current.theta % (Math.PI * 2);
         if (t < 0) t += Math.PI * 2;
-
-        // Snap to nearest quadrant to determine "Main View"
-        // 0 = Front (looking at Z- face? No, looking at Front Z+ face... wait)
-        // Camera at (0, 0, 20) is Theta=0. Looking at (0,0,0). It sees the Z+ face (Front).
-        // Camera at (20, 0, 0) is Theta=PI/2. Sees X+ face (Right).
         const quadrant = Math.round(t / (Math.PI / 2)) % 4;
         
         if (quadrant === 0) visibleFace = 'front';
@@ -457,55 +458,61 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
         else if (quadrant === 3) visibleFace = 'left';
     }
 
-    // 4. Find Valid Blocks (Optical Illusion Check)
-    const TOLERANCE = 0.05; 
-    const validBlocks: THREE.Mesh[] = [];
+    const checkSafe = (mesh: THREE.Mesh) => {
+        const d = mesh.userData;
+        if (d.type === 'deco') return false;
+        if (d.dangerFaces && visibleFace && d.dangerFaces.includes(visibleFace)) return false;
+        return true;
+    };
 
     for (const blockMesh of blocksRef.current) {
-        const bData = blockMesh.userData;
-        
-        // Skip current block
-        if (bData.x === playerGridPos.current.x && 
-            bData.y === playerGridPos.current.y && 
-            bData.z === playerGridPos.current.z) continue;
+        // Skip self
+        if (blockMesh.userData.x === playerGridPos.current.x && 
+            blockMesh.userData.y === playerGridPos.current.y && 
+            blockMesh.userData.z === playerGridPos.current.z) continue;
 
-        // Check if black deco (void)
-        if (bData.type === 'deco') continue;
+        if (!checkSafe(blockMesh)) continue;
 
-        // *** NEW LOGIC: PER-FACE DANGER ***
-        // If the block has a red face, and we are looking at that face, IT IS A WALL.
-        if (bData.dangerFaces && visibleFace && bData.dangerFaces.includes(visibleFace)) {
-            // Visual feedback could be added here (e.g., glitch effect)
-            continue; 
-        }
-
-        const bVis = new THREE.Vector3(bData.x, bData.y + CUBE_SIZE/2, bData.z);
-        const bScreen = bVis.project(cam);
+        const bVis = new THREE.Vector3(blockMesh.userData.x, blockMesh.userData.y + CUBE_SIZE/2, blockMesh.userData.z);
+        const bScreen = bVis.clone().project(cam);
         const bScreen2D = new THREE.Vector2(bScreen.x, bScreen.y);
+
+        const diffVec = new THREE.Vector2().subVectors(bScreen2D, pScreen2D);
+        const dist = diffVec.length();
         
-        // Strictly use 2D distance
-        if (idealScreen2D.distanceTo(bScreen2D) < TOLERANCE) {
-            validBlocks.push(blockMesh);
-        }
+        // CRITICAL CHECK 1: Direction Alignment
+        // Does this block lie in the direction of the input?
+        if (diffVec.normalize().dot(inputScreenDir) < 0.95) continue;
+
+        // CRITICAL CHECK 2: Step Size Matching
+        // Is this block approx 1 step away?
+        // Tolerance is relative to the step size to handle different resolutions/screens
+        const tolerance = refStepScreenLen * 0.25; 
+        if (Math.abs(dist - refStepScreenLen) > tolerance) continue;
+
+        validBlocks.push({ 
+            mesh: blockMesh, 
+            camDist: blockMesh.position.distanceTo(cam.position) 
+        });
     }
 
     if (validBlocks.length > 0) {
-        // TOP VIEW SPECIAL LOGIC: Stacked blocks? Pick the HIGHEST one.
-        if (viewMode === 'TOP') {
-             validBlocks.sort((a, b) => b.userData.y - a.userData.y);
-        }
-        
-        movePlayer(validBlocks[0]);
+        // Sort by visual depth (closest to camera wins, simulating walking "on" the visible surface)
+        validBlocks.sort((a, b) => a.camDist - b.camDist);
+        movePlayer(validBlocks[0].mesh);
     } else {
-      // Wall Hit Effect
-      gsap.to(cameraState.current, {
+        shakeCamera();
+        audioController?.playFail();
+    }
+  };
+
+  const shakeCamera = () => {
+    gsap.to(cameraState.current, {
         radius: 19.8,
         yoyo: true,
         repeat: 1,
         duration: 0.05
       });
-      audioController?.playFail(); // Feedback for hitting a "red wall" or empty space
-    }
   };
 
   const handleDeath = () => {
@@ -513,7 +520,6 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
     setMsg("PARADOX DETECTED - RESETTING");
     audioController?.playFail();
     
-    // Shake effect
     gsap.to(cameraState.current, {
         radius: 18,
         yoyo: true,
@@ -587,9 +593,12 @@ export const GameScene: React.FC<GameSceneProps> = ({ level, onLevelComplete, au
       
       {/* UI Overlay */}
       <div className="absolute top-8 left-8 pointer-events-none select-none z-10">
-        <h1 className="text-4xl font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-pink-300 via-purple-300 to-blue-400 mb-2 drop-shadow-[0_0_15px_rgba(200,100,255,0.6)]">VIEWPOINT</h1>
+        <h1 className="text-4xl font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-pink-300 via-purple-300 to-blue-400 mb-2 drop-shadow-[0_0_15px_rgba(200,100,255,0.6)]">MINDPOINT</h1>
         <div className="w-16 h-1 bg-gradient-to-r from-purple-500 to-pink-500 mb-4 shadow-[0_0_10px_#d8b4fe]"></div>
-        <p className="text-purple-200/80 font-mono text-sm uppercase tracking-widest">Level {level.id} // {level.name}</p>
+        <p className="text-purple-200/80 font-mono text-sm uppercase tracking-widest">Level {level.id} - {level.name}</p>
+        {level.quote && (
+          <p className="text-xs italic text-purple-300/70 mt-1 mb-2 font-serif max-w-sm">"{level.quote}"</p>
+        )}
         <p className="text-xs text-purple-400/50 mt-1 max-w-xs">{level.description}</p>
       </div>
 

@@ -56,7 +56,7 @@ const App: React.FC = () => {
         
         <div className="z-10 text-center space-y-8 animate-in fade-in duration-1000 zoom-in-95">
             <h1 className="text-5xl md:text-7xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-200 via-purple-300 to-pink-200 tracking-[0.2em] drop-shadow-[0_0_25px_rgba(200,200,255,0.4)]">
-                VIEWPOINT
+                MINDPOINT
             </h1>
             <p className="text-purple-300/60 tracking-widest text-sm uppercase">A Journey of Perspective</p>
             
